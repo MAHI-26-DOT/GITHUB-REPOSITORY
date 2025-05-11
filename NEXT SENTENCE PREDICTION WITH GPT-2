@@ -1,0 +1,113 @@
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN custom operations for compatibility
+
+try:
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel
+except ImportError as e:
+    raise ImportError("Failed to import transformers GPT-2 modules. Try: pip install transformers==4.38.2") from e
+
+try:
+    import torch
+except ImportError as e:
+    raise ImportError("PyTorch is not installed. Please install PyTorch with: conda install pytorch -c pytorch") from e
+
+import streamlit as st
+from nltk.tokenize import sent_tokenize
+import nltk
+from rouge_score import rouge_scorer
+
+# Download NLTK data
+nltk.download('punkt', quiet=True)
+
+# Load GPT-2 tokenizer and model
+@st.cache_resource
+def load_model():
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    model = GPT2LMHeadModel.from_pretrained('gpt2')
+    return tokenizer, model
+
+gpt2_tokenizer, gpt2_model = load_model()
+
+def generate_gpt2_sentences(input_text, num_sentences=5, max_length=50):
+    """
+    Generate candidate next sentences using GPT-2.
+    """
+    prompt = f"{input_text} The next sentence is:"
+    inputs = gpt2_tokenizer.encode(prompt, return_tensors='pt', max_length=512, truncation=True)
+    outputs = gpt2_model.generate(
+        inputs,
+        max_length=max_length,
+        num_return_sequences=num_sentences,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95,
+        temperature=0.7,
+        num_beams=5,
+        pad_token_id=gpt2_tokenizer.eos_token_id
+    )
+    generated_sentences = []
+    for output in outputs:
+        text = gpt2_tokenizer.decode(output, skip_special_tokens=True)
+        generated_part = text[len(input_text):].strip()
+        sentences = sent_tokenize(generated_part)
+        if sentences and sentences[0] != input_text.strip():
+            generated_sentences.append(sentences[0])
+    return generated_sentences[:num_sentences]
+
+def score_coherence(input_sentence, candidate_sentence):
+    """
+    Score coherence of candidate sentence using ROUGE-L.
+    """
+    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+    scores = scorer.score(input_sentence, candidate_sentence)
+    return scores['rougeL'].fmeasure
+
+def rank_sentences(input_sentence, candidate_sentences):
+    """
+    Rank candidate sentences by coherence score.
+    """
+    ranked_sentences = []
+    for candidate in candidate_sentences:
+        score = score_coherence(input_sentence, candidate)
+        ranked_sentences.append((candidate, score))
+    ranked_sentences.sort(key=lambda x: x[1], reverse=True)
+    return ranked_sentences
+
+def main():
+    """
+    Streamlit interface for GPT-2-based Next Sentence Prediction.
+    """
+    st.title("Next Sentence Prediction with GPT-2")
+    st.markdown("Enter a sentence below, and GPT-2 will predict coherent next sentences, ranked by relevance. Ideal for conversational AI, content creation, or auto-completion!")
+
+    # Input text area
+    user_input = st.text_area("Your Sentence", "The sun sets slowly behind the mountain.", height=100)
+
+    # Predict button
+    if st.button("Generate Next Sentences"):
+        input_sentences = sent_tokenize(user_input)
+        if not input_sentences:
+            st.error("Please enter a valid sentence.")
+            return
+        last_sentence = input_sentences[-1]
+
+        # Generate and rank sentences
+        with st.spinner("Generating predictions..."):
+            candidate_sentences = generate_gpt2_sentences(last_sentence, num_sentences=5)
+        
+        if not candidate_sentences:
+            st.error("Unable to generate predictions. Try a different input.")
+            return
+
+        ranked_sentences = rank_sentences(last_sentence, candidate_sentences)
+
+        # Display results
+        st.subheader("Predicted Next Sentences")
+        if ranked_sentences:
+            for i, (sentence, score) in enumerate(ranked_sentences[:3], 1):
+                st.write(f"{i}. {sentence} (Relevance Score: {score:.4f})")
+        else:
+            st.write("No coherent predictions found. Try a different input.")
+
+if __name__ == "__main__":
+    main()
